@@ -7,3 +7,9 @@ services:
     envVars:
       - key: APP_PASSWORD
         sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: REMINDER_EMAIL
+        value: i.reymelloni@gmail.com
+      - key: RESEND_FROM_EMAIL
+        value: onboarding@resend.dev
