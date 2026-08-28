@@ -236,6 +236,9 @@ class Solicitudes(BaseHTTPRequestHandler):
     def do_GET(self):
         ruta=urlparse(self.path).path
         if ruta=="/manifest.json": self.enviar(MANIFEST,"application/manifest+json; charset=utf-8"); return
+        if ruta=="/health":
+            self.enviar(json.dumps({"ok": True}), "application/json; charset=utf-8")
+            return
         if not self.autenticado(): self.enviar(LOGIN_HTML); return
         if ruta=="/": self.enviar(HTML)
         elif ruta=="/api/tareas": self.enviar(json.dumps(obtener_tareas(),ensure_ascii=False),"application/json; charset=utf-8")
