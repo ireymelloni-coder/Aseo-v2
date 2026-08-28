@@ -4,6 +4,10 @@ import json
 import os
 from pathlib import Path
 import secrets
+import threading
+import time
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, unquote_plus, urlparse
 
 
@@ -13,6 +17,10 @@ CONTRASENA = os.environ.get("APP_PASSWORD", "cambia-esta-contrasena")
 ARCHIVO_DATOS = Path(__file__).with_name("tareas_datos.json")
 SESIONES = set()
 PERSONAS = ("Montserrat", "Iñaki")
+EMAIL_DESTINO = os.environ.get("REMINDER_EMAIL", "i.reymelloni@gmail.com")
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
+EMAIL_REMITENTE = os.environ.get("RESEND_FROM_EMAIL", "onboarding@resend.dev")
+RECORDATORIOS = Path(__file__).with_name("recordatorios_enviados.json")
 TAREAS_PREDEFINIDAS = {"baño": 7, "cocina": 3, "encerar piso": 14}
 
 
@@ -67,6 +75,67 @@ def guardar_datos(tareas):
 
 
 tareas = cargar_datos()
+
+
+def enviar_recordatorio(asunto, mensaje):
+    if not RESEND_API_KEY:
+        return
+    contenido = json.dumps({
+        "from": EMAIL_REMITENTE,
+        "to": [EMAIL_DESTINO],
+        "subject": asunto,
+        "text": mensaje,
+    }).encode("utf-8")
+    solicitud = Request(
+        "https://api.resend.com/emails",
+        data=contenido,
+        headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(solicitud, timeout=15):
+        pass
+
+
+def revisar_recordatorios():
+    while True:
+        try:
+            hoy = datetime.now().date()
+            enviados = {}
+            if RECORDATORIOS.exists():
+                with RECORDATORIOS.open("r", encoding="utf-8") as archivo:
+                    enviados = json.load(archivo)
+            cambio = False
+            for tarea in tareas.values():
+                elementos = [(tarea["nombre"], tarea["ultima"], tarea["intervalo"], tarea.get("asignada_a"))]
+                elementos.extend(
+                    (f"{tarea['nombre']} - {sub['nombre']}", sub["ultima"] or tarea["ultima"], sub["dias"], tarea.get("asignada_a"))
+                    for sub in tarea.get("subtareas", [])
+                )
+                for nombre, ultima, intervalo, responsable in elementos:
+                    vencimiento = (ultima + timedelta(days=intervalo)).date()
+                    dias = (vencimiento - hoy).days
+                    if dias not in (0, 1):
+                        continue
+                    clave = f"{nombre}:{vencimiento.isoformat()}:{dias}"
+                    if clave in enviados:
+                        continue
+                    cuando = "hoy" if dias == 0 else "mañana"
+                    enviar_recordatorio(
+                        f"Recordatorio: {nombre} vence {cuando}",
+                        f"La tarea '{nombre}' asignada a {responsable or 'la casa'} vence {cuando} ({vencimiento:%d/%m/%Y}).",
+                    )
+                    enviados[clave] = datetime.now().isoformat()
+                    cambio = True
+            if cambio:
+                with RECORDATORIOS.open("w", encoding="utf-8") as archivo:
+                    json.dump(enviados, archivo, indent=2, ensure_ascii=False)
+        except (OSError, ValueError, TimeoutError, HTTPError, URLError) as error:
+            print(f"No se pudieron revisar los recordatorios: {error}")
+        time.sleep(3600)
+
+
+if RESEND_API_KEY:
+    threading.Thread(target=revisar_recordatorios, daemon=True).start()
 
 
 def fecha_tarea(ultima, intervalo):
