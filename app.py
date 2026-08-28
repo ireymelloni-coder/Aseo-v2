@@ -100,6 +100,10 @@ HTML = """<!doctype html>
     .datos strong { display: block; color: #172033; font-size: .98rem; }
     button { width: 100%; min-height: 46px; margin-top: 16px; border: 0; border-radius: 10px; background: #2563eb; color: white; font: inherit; font-weight: 700; cursor: pointer; touch-action: manipulation; }
     button:active { background: #1d4ed8; transform: translateY(1px); }
+    button.secundario { margin-top: 8px; border: 1px solid #cbd5e1; background: white; color: #334155; }
+    button.secundario:active { background: #f8fafc; }
+    .confirmacion { margin-top: 16px; padding: 14px; border: 1px solid #bfdbfe; border-radius: 12px; background: #eff6ff; }
+    .confirmacion p { margin: 0; color: #1e3a8a; font-weight: 600; }
     @media (min-width: 650px) { .lista { grid-template-columns: repeat(2, 1fr); } .tarjeta:last-child { grid-column: span 2; } }
   </style>
 </head>
@@ -128,11 +132,28 @@ HTML = """<!doctype html>
           <div class="barra"><div class="relleno ${vencida ? "vencida" : ""}" style="width:${tarea.porcentaje}%"></div></div>
           <div class="datos"><div>Última limpieza<strong>${tarea.ultima}</strong></div>
             <div>Próxima limpieza<strong>${tarea.proxima}</strong></div></div>
-          <button type="button" data-tarea="${escapeHtml(tarea.nombre)}">Marcar como hecha</button>
+          <button type="button" class="activar-confirmacion" data-tarea="${escapeHtml(tarea.nombre)}">Marcar como hecha</button>
+          <div class="confirmacion" hidden>
+            <p>¿Seguro que quieres marcar esta tarea como hecha?</p>
+            <button type="button" data-confirmar="${escapeHtml(tarea.nombre)}">Marcar como hecha</button>
+            <button type="button" class="secundario" data-cancelar>Volver</button>
+          </div>
         </article>`;
       }).join("");
-      document.querySelectorAll("button[data-tarea]").forEach((boton) => {
-        boton.addEventListener("click", () => marcarTarea(boton.dataset.tarea, boton));
+      document.querySelectorAll(".activar-confirmacion").forEach((boton) => {
+        boton.addEventListener("click", () => {
+          boton.hidden = true;
+          boton.nextElementSibling.hidden = false;
+        });
+      });
+      document.querySelectorAll("[data-cancelar]").forEach((boton) => {
+        boton.addEventListener("click", () => {
+          boton.parentElement.hidden = true;
+          boton.parentElement.previousElementSibling.hidden = false;
+        });
+      });
+      document.querySelectorAll("button[data-confirmar]").forEach((boton) => {
+        boton.addEventListener("click", () => marcarTarea(boton.dataset.confirmar, boton));
       });
     }
 
@@ -207,7 +228,6 @@ class Solicitudes(BaseHTTPRequestHandler):
             longitud = int(self.headers.get("Content-Length", "0"))
             datos = self.rfile.read(longitud).decode("utf-8")
             password = dict(parte.split("=", 1) for parte in datos.split("&") if "=" in parte).get("password", "")
-            from urllib.parse import unquote_plus
             if unquote_plus(password) != CONTRASENA:
                 self.enviar(LOGIN_HTML.replace("</form>", "<p>Contraseña incorrecta.</p></form>"), estado=401)
                 return
