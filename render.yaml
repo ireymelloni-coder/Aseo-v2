@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: control-de-limpieza
+    runtime: python
+    buildCommand: python -m py_compile app.py
+    startCommand: python app.py
+    envVars:
+      - key: APP_PASSWORD
+        sync: false
