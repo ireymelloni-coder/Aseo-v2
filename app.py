@@ -40,6 +40,8 @@ def cargar_datos():
     tareas = {}
     for nombre, dato in datos.items():
         tarea = dict(dato)
+        tarea["temporal"] = tarea.get("temporal", nombre not in TAREAS_PREDEFINIDAS)
+        tarea["asignada_a"] = tarea.get("asignada_a")
         tarea["ultima"] = datetime.fromisoformat(tarea["ultima"])
         for subtarea in tarea.get("subtareas", []):
             subtarea["ultima"] = datetime.fromisoformat(subtarea["ultima"]) if subtarea.get("ultima") else None
@@ -52,6 +54,8 @@ def guardar_datos(tareas):
     for nombre, tarea in tareas.items():
         copia = dict(tarea)
         copia["ultima"] = copia["ultima"].isoformat()
+        copia.setdefault("temporal", nombre not in TAREAS_PREDEFINIDAS)
+        copia.setdefault("asignada_a", None)
         copia["subtareas"] = []
         for subtarea in tarea.get("subtareas", []):
             item = dict(subtarea)
@@ -88,6 +92,7 @@ def obtener_tareas():
             "ultima": tarea["ultima"].strftime("%d/%m/%Y"), "proxima": proxima.strftime("%d/%m/%Y"),
             "dias_restantes": dias, "porcentaje": max(0, min(100, round(dias / tarea["intervalo"] * 100))),
             "estado": "pendiente" if dias < 0 else "al día", "realizada_por": tarea.get("realizada_por"),
+            "temporal": tarea.get("temporal", False), "asignada_a": tarea.get("asignada_a"),
             "subtareas": subtareas,
         })
     return resultado
@@ -116,6 +121,7 @@ button.secundario{border:1px solid #cbd5e1;background:#fff;color:#334155}.confir
 <main><div id="mensaje" class="mensaje" aria-live="polite"></div>
 <section class="formulario"><h2>Añadir tarea</h2><label>Nombre<input id="nuevo-nombre" placeholder="Ej.: Lavar la ropa"></label>
 <label>Cada cuántos días<input id="nuevo-intervalo" type="number" min="1" value="7"></label>
+<label>¿Para quién es?<select id="nuevo-responsable"><option>Montserrat</option><option>Iñaki</option></select></label>
 <div id="subtareas"></div><button type="button" class="secundario" id="agregar-subtarea">+ Añadir subtarea</button>
 <button type="button" id="guardar-tarea">Guardar tarea</button></section>
 <section id="lista" class="lista">Cargando...</section></main>
@@ -127,7 +133,7 @@ document.querySelector("#agregar-subtarea").onclick=agregarCampoSubtarea;
 async function cargarTareas(){const r=await fetch("/api/tareas");if(!r.ok)throw Error("No se pudieron cargar las tareas.");const datos=await r.json();
 lista.innerHTML=datos.map(t=>{const vencida=t.dias_restantes<0;return `<article class="tarjeta"><div class="encabezado"><h2>${escapeHtml(t.nombre)}</h2><span class="estado ${vencida?"vencida":""}">${t.estado}</span></div>
 <div class="barra"><div class="relleno ${vencida?"vencida":""}" style="width:${t.porcentaje}%"></div></div><div class="datos"><div>Última limpieza<strong>${t.ultima}</strong></div><div>Próxima limpieza<strong>${t.proxima}</strong></div></div>
-${t.realizada_por?`<small>Última vez: ${escapeHtml(t.realizada_por)}</small>`:""}${t.subtareas.length?`<ul class="sublista">${t.subtareas.map(s=>`<li><strong>${escapeHtml(s.nombre)}</strong> · ${s.dias_restantes<0?"vencida":"faltan "+s.dias_restantes+" día(s)"}${s.realizada_por?" · "+escapeHtml(s.realizada_por):""}<button type="button" data-sub="${escapeHtml(t.nombre)}" data-subnombre="${escapeHtml(s.nombre)}">Completar subtarea</button></li>`).join("")}</ul>`:""}
+${t.asignada_a?`<small>Asignada a: ${escapeHtml(t.asignada_a)}</small>`:""}${t.realizada_por?`<small> · Última vez: ${escapeHtml(t.realizada_por)}</small>`:""}${t.subtareas.length?`<ul class="sublista">${t.subtareas.map(s=>`<li><strong>${escapeHtml(s.nombre)}</strong> · ${s.dias_restantes<0?"vencida":"faltan "+s.dias_restantes+" día(s)"}${s.realizada_por?" · "+escapeHtml(s.realizada_por):""}<button type="button" data-sub="${escapeHtml(t.nombre)}" data-subnombre="${escapeHtml(s.nombre)}">Completar subtarea</button></li>`).join("")}</ul>`:""}
 <button type="button" class="activar" data-tarea="${escapeHtml(t.nombre)}">Marcar como hecha</button><div class="confirmacion" hidden><p>¿Seguro que quieres marcar la tarea como hecha?</p><label>¿Quién la hizo?<select data-persona><option>Montserrat</option><option>Iñaki</option></select></label><button type="button" data-confirmar="${escapeHtml(t.nombre)}">Marcar como hecha</button><button type="button" class="secundario cancelar">Volver</button></div></article>`}).join("");
 document.querySelectorAll(".activar").forEach(b=>b.onclick=()=>{b.hidden=true;b.nextElementSibling.hidden=false});
 document.querySelectorAll(".cancelar").forEach(b=>b.onclick=()=>{b.parentElement.hidden=true;b.parentElement.previousElementSibling.hidden=false});
@@ -137,8 +143,9 @@ async function completar(nombre,subnombre,boton){const tarjeta=boton.closest(".t
 const r=await fetch("/api/completar",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({nombre,subnombre,persona})});boton.disabled=false;
 if(!r.ok){mensaje.textContent="No se pudo guardar el cambio.";return}mensaje.textContent="Cambio guardado.";await cargarTareas()}
 document.querySelector("#guardar-tarea").onclick=async()=>{const nombre=document.querySelector("#nuevo-nombre").value.trim(),intervalo=Number(document.querySelector("#nuevo-intervalo").value);
+const responsable=document.querySelector("#nuevo-responsable").value;
 const subs=[...document.querySelectorAll(".subtarea")].map(f=>({nombre:f.querySelector(".sub-nombre").value.trim(),dias:Number(f.querySelector(".sub-dias").value)})).filter(s=>s.nombre);
-if(!nombre||!intervalo){mensaje.textContent="Indica un nombre y un plazo válido.";return}const r=await fetch("/api/tareas",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({nombre,intervalo,subtareas:subs})});
+if(!nombre||!intervalo){mensaje.textContent="Indica un nombre y un plazo válido.";return}const r=await fetch("/api/tareas",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({nombre,intervalo,responsable,subtareas:subs})});
 if(!r.ok){mensaje.textContent=(await r.text())||"No se pudo crear la tarea.";return}document.querySelector("#nuevo-nombre").value="";subtareas.innerHTML="";mensaje.textContent="Tarea añadida.";await cargarTareas()};
 cargarTareas().catch(e=>lista.textContent=e.message);
 </script></body></html>"""
@@ -180,7 +187,9 @@ class Solicitudes(BaseHTTPRequestHandler):
         if ruta=="/api/tareas":
             nombre=str(dato.get("nombre","")).strip(); intervalo=int(dato.get("intervalo",0))
             if not nombre or intervalo<1 or nombre in tareas: self.enviar("Nombre inválido o ya existente",estado=400); return
-            tareas[nombre]={"nombre":nombre,"intervalo":intervalo,"ultima":datetime.now(),"realizada_por":None,"subtareas":[]}
+            responsable=dato.get("responsable")
+            if responsable not in PERSONAS: self.enviar("Responsable inválido",estado=400); return
+            tareas[nombre]={"nombre":nombre,"intervalo":intervalo,"ultima":datetime.now(),"realizada_por":None,"asignada_a":responsable,"temporal":True,"subtareas":[]}
             for sub in dato.get("subtareas",[]): 
                 if sub.get("nombre") and int(sub.get("dias",0))>0: tareas[nombre]["subtareas"].append({"nombre":sub["nombre"],"dias":int(sub["dias"]),"ultima":None,"realizada_por":None})
             guardar_datos(tareas); self.enviar(json.dumps({"ok":True}),"application/json"); return
@@ -191,7 +200,11 @@ class Solicitudes(BaseHTTPRequestHandler):
                 subtarea=next((s for s in tareas[nombre]["subtareas"] if s["nombre"]==dato["subnombre"]),None)
                 if not subtarea: self.enviar("Subtarea no encontrada",estado=404); return
                 subtarea["ultima"]=datetime.now(); subtarea["realizada_por"]=persona
-            else: tareas[nombre]["ultima"]=datetime.now(); tareas[nombre]["realizada_por"]=persona
+            else:
+                if tareas[nombre].get("temporal"):
+                    del tareas[nombre]
+                else:
+                    tareas[nombre]["ultima"]=datetime.now(); tareas[nombre]["realizada_por"]=persona
             guardar_datos(tareas); self.enviar(json.dumps({"ok":True}),"application/json"); return
         self.enviar("No encontrado",estado=404)
 
