@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 import secrets
-from urllib.parse import urlparse
+from urllib.parse import unquote_plus, urlparse
 
 
 HOST = "0.0.0.0"
@@ -227,7 +227,7 @@ class Solicitudes(BaseHTTPRequestHandler):
             self.enviar("No encontrado", estado=404)
             return
 
-        tarea = ruta[len(prefijo):-len("/completar")]
+        tarea = unquote_plus(ruta[len(prefijo):-len("/completar")])
         if tarea not in TAREAS_PREDEFINIDAS:
             self.enviar("Tarea no encontrada", estado=404)
             return
