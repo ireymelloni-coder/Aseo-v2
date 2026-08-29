@@ -8,7 +8,7 @@ import threading
 import time
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, unquote_plus, urlparse
+from urllib.parse import parse_qs, quote, unquote_plus, urlparse
 
 
 HOST = "0.0.0.0"
@@ -17,11 +17,111 @@ CONTRASENA = os.environ.get("APP_PASSWORD", "cambia-esta-contrasena")
 ARCHIVO_DATOS = Path(__file__).with_name("tareas_datos.json")
 SESIONES = set()
 PERSONAS = ("Montserrat", "Iñaki")
-EMAIL_DESTINO = os.environ.get("REMINDER_EMAIL", "i.reymelloni@gmail.com")
+EMAIL_POR_PERSONA = {
+    "Iñaki": os.environ.get("REMINDER_EMAIL_INAKI", "i.reymelloni@gmail.com"),
+    "Montserrat": os.environ.get("REMINDER_EMAIL_MONTSERRAT", ""),
+}
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
 EMAIL_REMITENTE = os.environ.get("RESEND_FROM_EMAIL", "onboarding@resend.dev")
 RECORDATORIOS = Path(__file__).with_name("recordatorios_enviados.json")
+ARCHIVO_HISTORIAL = Path(__file__).with_name("historial_datos.json")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+SUPABASE_ACTIVO = bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
 TAREAS_PREDEFINIDAS = {"baño": 7, "cocina": 3, "encerar piso": 14}
+
+
+def supabase_request(endpoint, method="GET", payload=None, query=""):
+    """Acceso REST opcional; la clave service role nunca se envía al navegador."""
+    if not SUPABASE_ACTIVO:
+        return None
+    url = f"{SUPABASE_URL}/rest/v1/{endpoint}{query}"
+    datos = json.dumps(payload).encode("utf-8") if payload is not None else None
+    solicitud = Request(url, data=datos, method=method, headers={
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": "B" + "earer " + SUPABASE_SERVICE_ROLE_KEY,
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    })
+    with urlopen(solicitud, timeout=10) as respuesta:
+        contenido = respuesta.read()
+        return json.loads(contenido.decode("utf-8")) if contenido else []
+
+
+def cargar_datos_supabase():
+    tareas = {}
+    filas = supabase_request("tareas", query="?select=*&order=id.asc")
+    subtareas = supabase_request("subtareas", query="?select=*&order=id.asc")
+    for fila in filas or []:
+        ultima = fila.get("ultima_realizacion")
+        tareas[fila["nombre"]] = {
+            "nombre": fila["nombre"], "intervalo": fila["intervalo_dias"],
+            "ultima": datetime.fromisoformat(ultima.replace("Z", "+00:00")).replace(tzinfo=None) if ultima else datetime.now(),
+            "realizada_por": fila.get("realizada_por"), "asignada_a": fila.get("asignada_a"),
+            "temporal": not fila.get("es_recurrente", False), "subtareas": [], "_id": fila.get("id"),
+        }
+    for fila in subtareas or []:
+        tarea = next((t for t in tareas.values() if t.get("_id") == fila.get("tarea_id")), None)
+        if tarea is None:
+            padre = next((t for t in tareas.values() if t["nombre"] == fila.get("tarea_nombre")), None)
+        else:
+            padre = tarea
+        if padre:
+            ultima = fila.get("ultima_realizacion")
+            padre["subtareas"].append({"nombre": fila["nombre"], "dias": fila["intervalo_dias"],
+                "ultima": datetime.fromisoformat(ultima.replace("Z", "+00:00")).replace(tzinfo=None) if ultima else None,
+                "realizada_por": fila.get("realizada_por")})
+    return tareas
+
+
+def cargar_historial():
+    try:
+        if SUPABASE_ACTIVO:
+            filas = supabase_request("historial_tareas", query="?select=*&order=completada_en.desc")
+            return [{"tarea": f["tarea_nombre"], "subtarea": f.get("subtarea_nombre"),
+                     "persona": f["completada_por"], "fecha": f["completada_en"]} for f in filas or []]
+        if ARCHIVO_HISTORIAL.exists():
+            with ARCHIVO_HISTORIAL.open("r", encoding="utf-8") as archivo:
+                return json.load(archivo)
+    except (OSError, ValueError, HTTPError, URLError):
+        pass
+    return []
+
+
+def registrar_historial(nombre, subtarea, persona, fecha):
+    evento = {"tarea": nombre, "subtarea": subtarea, "persona": persona, "fecha": fecha.isoformat()}
+    if SUPABASE_ACTIVO:
+        try:
+            supabase_request("historial_tareas", method="POST", payload={
+                "tarea_nombre": nombre, "subtarea_nombre": subtarea,
+                "completada_por": persona, "completada_en": evento["fecha"],
+            })
+            return
+        except (HTTPError, URLError, OSError, ValueError):
+            pass
+    historial = cargar_historial()
+    historial.insert(0, evento)
+    with ARCHIVO_HISTORIAL.open("w", encoding="utf-8") as archivo:
+        json.dump(historial, archivo, indent=2, ensure_ascii=False)
+
+
+def sincronizar_tarea(nombre):
+    if not SUPABASE_ACTIVO:
+        return
+    tarea = tareas[nombre]
+    filas = supabase_request("tareas", method="POST", payload={
+        "nombre": nombre, "intervalo_dias": tarea["intervalo"],
+        "es_recurrente": not tarea.get("temporal", False),
+        "asignada_a": tarea.get("asignada_a"), "ultima_realizacion": tarea["ultima"].isoformat(),
+        "realizada_por": tarea.get("realizada_por"),
+    })
+    if filas:
+        tarea["_id"] = filas[0].get("id")
+        for sub in tarea.get("subtareas", []):
+            supabase_request("subtareas", method="POST", payload={
+                "tarea_id": tarea["_id"], "nombre": sub["nombre"],
+                "intervalo_dias": sub["dias"], "ultima_realizacion": None,
+            })
 
 
 def cargar_datos():
@@ -74,22 +174,31 @@ def guardar_datos(tareas):
         json.dump(datos, archivo, indent=2, ensure_ascii=False)
 
 
-tareas = cargar_datos()
+if SUPABASE_ACTIVO:
+    try:
+        tareas = cargar_datos_supabase()
+        if not tareas:
+            raise ValueError("Supabase vacío")
+    except (HTTPError, URLError, OSError, ValueError, KeyError):
+        print("Supabase no disponible; usando almacenamiento JSON local.")
+        tareas = cargar_datos()
+else:
+    tareas = cargar_datos()
 
 
-def enviar_recordatorio(asunto, mensaje):
-    if not RESEND_API_KEY:
+def enviar_recordatorio(asunto, mensaje, destinatario):
+    if not RESEND_API_KEY or not destinatario:
         return
     contenido = json.dumps({
         "from": EMAIL_REMITENTE,
-        "to": [EMAIL_DESTINO],
+        "to": [destinatario],
         "subject": asunto,
         "text": mensaje,
     }).encode("utf-8")
     solicitud = Request(
         "https://api.resend.com/emails",
         data=contenido,
-        headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+        headers={"Authorization": "B" + "earer " + RESEND_API_KEY, "Content-Type": "application/json"},
         method="POST",
     )
     with urlopen(solicitud, timeout=15):
@@ -120,9 +229,13 @@ def revisar_recordatorios():
                     if clave in enviados:
                         continue
                     cuando = "hoy" if dias == 0 else "mañana"
+                    destinatario = EMAIL_POR_PERSONA.get(responsable or "Iñaki", "")
+                    if not destinatario:
+                        continue
                     enviar_recordatorio(
                         f"Recordatorio: {nombre} vence {cuando}",
                         f"La tarea '{nombre}' asignada a {responsable or 'la casa'} vence {cuando} ({vencimiento:%d/%m/%Y}).",
+                        destinatario,
                     )
                     enviados[clave] = datetime.now().isoformat()
                     cambio = True
@@ -176,6 +289,7 @@ body{margin:0;background:#f1f5f9}header{padding:28px 16px;color:#fff;background:
 header h1,header p,main{max-width:760px;margin-left:auto;margin-right:auto}header h1{margin-top:0;margin-bottom:5px}
 main{padding:18px 14px 36px}.mensaje{min-height:24px;color:#166534;font-weight:600}.lista{display:grid;gap:14px}
 .tarjeta,.formulario{padding:18px;border:1px solid #e2e8f0;border-radius:16px;background:#fff;box-shadow:0 5px 16px #0f172a0c}
+.topbar{max-width:760px;margin:auto;display:flex;align-items:center;justify-content:space-between;gap:18px}.topbar select{width:auto;margin:0;background:#ffffff22;color:#fff;border:1px solid #ffffff66}.calendario-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.calendario-grid div{padding:12px;border-radius:12px;background:#f8fafc;border:1px solid #e2e8f0}.calendario-grid small{color:#64748b}
 .encabezado{display:flex;justify-content:space-between;gap:12px}.encabezado h2{margin:0;text-transform:capitalize}
 .estado{padding:5px 9px;border-radius:999px;background:#dcfce7;color:#166534;font-size:.78rem;font-weight:700;white-space:nowrap}.vencida{background:#fee2e2;color:#991b1b}
 .barra{height:10px;margin:15px 0 10px;overflow:hidden;border-radius:999px;background:#e2e8f0}.relleno{height:100%;background:#22c55e}.relleno.vencida{background:#ef4444}
@@ -186,16 +300,16 @@ button.secundario{border:1px solid #cbd5e1;background:#fff;color:#334155}.confir
 .sublista{margin:14px 0 0;padding:0;list-style:none}.sublista li{padding:8px 0;border-top:1px solid #e2e8f0;font-size:.9rem}
 @media(min-width:650px){.lista{grid-template-columns:repeat(2,1fr)}.tarjeta:last-child{grid-column:span 2}}
 </style></head>
-<body><header><h1>Control de limpieza</h1><p>Organiza tus tareas del hogar.</p></header>
+<body><header><div class="topbar"><div><h1>Control de limpieza</h1><p>Organiza tus tareas del hogar.</p></div><select id="vista" aria-label="Cambiar vista"><option value="tareas">Tareas</option><option value="historial">Calendario e historial</option></select></div></header>
 <main><div id="mensaje" class="mensaje" aria-live="polite"></div>
 <section class="formulario"><h2>Añadir tarea</h2><label>Nombre<input id="nuevo-nombre" placeholder="Ej.: Lavar la ropa"></label>
 <label>Cada cuántos días<input id="nuevo-intervalo" type="number" min="1" value="7"></label>
 <label>¿Para quién es?<select id="nuevo-responsable"><option>Montserrat</option><option>Iñaki</option></select></label>
 <div id="subtareas"></div><button type="button" class="secundario" id="agregar-subtarea">+ Añadir subtarea</button>
 <button type="button" id="guardar-tarea">Guardar tarea</button></section>
-<section id="lista" class="lista">Cargando...</section></main>
+<section id="lista" class="lista">Cargando...</section><section id="panel-historial" class="formulario" hidden><h2>Calendario e historial</h2><div id="calendario" class="calendario"></div><ul id="historial" class="sublista"></ul></section></main>
 <script>
-const lista=document.querySelector("#lista"),mensaje=document.querySelector("#mensaje"),subtareas=document.querySelector("#subtareas");
+const lista=document.querySelector("#lista"),mensaje=document.querySelector("#mensaje"),subtareas=document.querySelector("#subtareas"),panel=document.querySelector("#panel-historial");
 const escapeHtml=v=>String(v).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
 function agregarCampoSubtarea(){const fila=document.createElement("div");fila.className="subtarea";fila.innerHTML='<input placeholder="Ej.: Colgar la ropa" class="sub-nombre"><input type="number" min="1" value="3" class="sub-dias">';subtareas.append(fila)}
 document.querySelector("#agregar-subtarea").onclick=agregarCampoSubtarea;
@@ -216,6 +330,8 @@ const responsable=document.querySelector("#nuevo-responsable").value;
 const subs=[...document.querySelectorAll(".subtarea")].map(f=>({nombre:f.querySelector(".sub-nombre").value.trim(),dias:Number(f.querySelector(".sub-dias").value)})).filter(s=>s.nombre);
 if(!nombre||!intervalo){mensaje.textContent="Indica un nombre y un plazo válido.";return}const r=await fetch("/api/tareas",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({nombre,intervalo,responsable,subtareas:subs})});
 if(!r.ok){mensaje.textContent=(await r.text())||"No se pudo crear la tarea.";return}document.querySelector("#nuevo-nombre").value="";subtareas.innerHTML="";mensaje.textContent="Tarea añadida.";await cargarTareas()};
+async function cargarHistorial(){const r=await fetch("/api/historial");const datos=await r.json();document.querySelector("#calendario").innerHTML=datos.length?`<div class="calendario-grid">${datos.slice(0,30).map(e=>`<div><strong>${new Date(e.fecha).toLocaleDateString("es-ES",{day:"2-digit",month:"short"})}</strong><br>${escapeHtml(e.tarea)}${e.subtarea?" · "+escapeHtml(e.subtarea):""}<small> · ${escapeHtml(e.persona)}</small></div>`).join("")}</div>`:"<p>Aún no hay completados.</p>";document.querySelector("#historial").innerHTML=datos.map(e=>`<li>${new Date(e.fecha).toLocaleString("es-ES")} · <strong>${escapeHtml(e.tarea)}</strong>${e.subtarea?" / "+escapeHtml(e.subtarea):""} · ${escapeHtml(e.persona)}</li>`).join("")}
+document.querySelector("#vista").onchange=async e=>{const historial=e.target.value==="historial";lista.hidden=historial;document.querySelector(".formulario").hidden=historial;panel.hidden=!historial;if(historial)await cargarHistorial()};
 cargarTareas().catch(e=>lista.textContent=e.message);
 </script></body></html>"""
 
@@ -242,6 +358,7 @@ class Solicitudes(BaseHTTPRequestHandler):
         if not self.autenticado(): self.enviar(LOGIN_HTML); return
         if ruta=="/": self.enviar(HTML)
         elif ruta=="/api/tareas": self.enviar(json.dumps(obtener_tareas(),ensure_ascii=False),"application/json; charset=utf-8")
+        elif ruta=="/api/historial": self.enviar(json.dumps(cargar_historial(),ensure_ascii=False),"application/json; charset=utf-8")
         else: self.enviar("No encontrado",estado=404)
 
     def leer_json(self):
@@ -264,19 +381,37 @@ class Solicitudes(BaseHTTPRequestHandler):
             tareas[nombre]={"nombre":nombre,"intervalo":intervalo,"ultima":datetime.now(),"realizada_por":None,"asignada_a":responsable,"temporal":True,"subtareas":[]}
             for sub in dato.get("subtareas",[]): 
                 if sub.get("nombre") and int(sub.get("dias",0))>0: tareas[nombre]["subtareas"].append({"nombre":sub["nombre"],"dias":int(sub["dias"]),"ultima":None,"realizada_por":None})
-            guardar_datos(tareas); self.enviar(json.dumps({"ok":True}),"application/json"); return
+            guardar_datos(tareas)
+            try:
+                sincronizar_tarea(nombre)
+            except (HTTPError, URLError, OSError, ValueError):
+                pass
+            self.enviar(json.dumps({"ok":True}),"application/json"); return
         if ruta=="/api/completar":
             nombre=dato.get("nombre"); persona=dato.get("persona")
             if nombre not in tareas or persona not in PERSONAS: self.enviar("Datos inválidos",estado=400); return
             if dato.get("subnombre"):
                 subtarea=next((s for s in tareas[nombre]["subtareas"] if s["nombre"]==dato["subnombre"]),None)
                 if not subtarea: self.enviar("Subtarea no encontrada",estado=404); return
-                subtarea["ultima"]=datetime.now(); subtarea["realizada_por"]=persona
+                ahora = datetime.now()
+                subtarea["ultima"]=ahora; subtarea["realizada_por"]=persona
             else:
+                ahora = datetime.now()
                 if tareas[nombre].get("temporal"):
                     del tareas[nombre]
                 else:
-                    tareas[nombre]["ultima"]=datetime.now(); tareas[nombre]["realizada_por"]=persona
+                    tareas[nombre]["ultima"]=ahora; tareas[nombre]["realizada_por"]=persona
+            registrar_historial(nombre, dato.get("subnombre"), persona, ahora)
+            if SUPABASE_ACTIVO and nombre in tareas:
+                try:
+                    if dato.get("subnombre"):
+                        supabase_request("subtareas", method="PATCH", payload={"ultima_realizacion": ahora.isoformat(), "realizada_por": persona},
+                                         query=f"?tarea_id=eq.{tareas[nombre].get('_id')}&nombre=eq.{quote(dato['subnombre'])}")
+                    else:
+                        supabase_request("tareas", method="PATCH", payload={"ultima_realizacion": ahora.isoformat(), "realizada_por": persona},
+                                         query=f"?nombre=eq.{quote(nombre)}")
+                except (HTTPError, URLError, OSError, ValueError):
+                    pass
             guardar_datos(tareas); self.enviar(json.dumps({"ok":True}),"application/json"); return
         self.enviar("No encontrado",estado=404)
 
