@@ -75,17 +75,30 @@ def cargar_datos_supabase():
 
 
 def cargar_historial():
-    try:
-        if SUPABASE_ACTIVO:
-            filas = supabase_request("historial_tareas", query="?select=*&order=completada_en.desc")
-            return [{"tarea": f["tarea_nombre"], "subtarea": f.get("subtarea_nombre"),
-                     "persona": f["completada_por"], "fecha": f["completada_en"]} for f in filas or []]
-        if ARCHIVO_HISTORIAL.exists():
+    historial_local = []
+    if ARCHIVO_HISTORIAL.exists():
+        try:
             with ARCHIVO_HISTORIAL.open("r", encoding="utf-8") as archivo:
-                return json.load(archivo)
-    except (OSError, ValueError, HTTPError, URLError):
-        pass
-    return []
+                historial_local = json.load(archivo)
+        except (OSError, ValueError) as error:
+            print(f"No se pudo leer el historial local: {error}")
+    if not SUPABASE_ACTIVO:
+        return historial_local
+    try:
+        filas = supabase_request("historial_tareas", query="?select=*&order=completada_en.desc")
+        historial_remoto = [
+            {"tarea": f["tarea_nombre"], "subtarea": f.get("subtarea_nombre"),
+             "persona": f["completada_por"], "fecha": f["completada_en"]}
+            for f in filas or []
+        ]
+        claves = {(e["tarea"], e.get("subtarea"), e["persona"], e["fecha"]) for e in historial_remoto}
+        return historial_remoto + [
+            e for e in historial_local
+            if (e["tarea"], e.get("subtarea"), e["persona"], e["fecha"]) not in claves
+        ]
+    except (OSError, ValueError, HTTPError, URLError) as error:
+        print(f"No se pudo leer el historial de Supabase: {error}")
+        return historial_local
 
 
 def registrar_historial(nombre, subtarea, persona, fecha):
@@ -96,10 +109,15 @@ def registrar_historial(nombre, subtarea, persona, fecha):
                 "tarea_nombre": nombre, "subtarea_nombre": subtarea,
                 "completada_por": persona, "completada_en": evento["fecha"],
             })
-            return
-        except (HTTPError, URLError, OSError, ValueError):
-            pass
-    historial = cargar_historial()
+        except (HTTPError, URLError, OSError, ValueError) as error:
+            print(f"No se pudo guardar el historial en Supabase: {error}")
+    historial = []
+    if ARCHIVO_HISTORIAL.exists():
+        try:
+            with ARCHIVO_HISTORIAL.open("r", encoding="utf-8") as archivo:
+                historial = json.load(archivo)
+        except (OSError, ValueError) as error:
+            print(f"No se pudo leer el historial local: {error}")
     historial.insert(0, evento)
     with ARCHIVO_HISTORIAL.open("w", encoding="utf-8") as archivo:
         json.dump(historial, archivo, indent=2, ensure_ascii=False)
@@ -330,8 +348,8 @@ const responsable=document.querySelector("#nuevo-responsable").value;
 const subs=[...document.querySelectorAll(".subtarea")].map(f=>({nombre:f.querySelector(".sub-nombre").value.trim(),dias:Number(f.querySelector(".sub-dias").value)})).filter(s=>s.nombre);
 if(!nombre||!intervalo){mensaje.textContent="Indica un nombre y un plazo válido.";return}const r=await fetch("/api/tareas",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({nombre,intervalo,responsable,subtareas:subs})});
 if(!r.ok){mensaje.textContent=(await r.text())||"No se pudo crear la tarea.";return}document.querySelector("#nuevo-nombre").value="";subtareas.innerHTML="";mensaje.textContent="Tarea añadida.";await cargarTareas()};
-async function cargarHistorial(){const r=await fetch("/api/historial");const datos=await r.json();document.querySelector("#calendario").innerHTML=datos.length?`<div class="calendario-grid">${datos.slice(0,30).map(e=>`<div><strong>${new Date(e.fecha).toLocaleDateString("es-ES",{day:"2-digit",month:"short"})}</strong><br>${escapeHtml(e.tarea)}${e.subtarea?" · "+escapeHtml(e.subtarea):""}<small> · ${escapeHtml(e.persona)}</small></div>`).join("")}</div>`:"<p>Aún no hay completados.</p>";document.querySelector("#historial").innerHTML=datos.map(e=>`<li>${new Date(e.fecha).toLocaleString("es-ES")} · <strong>${escapeHtml(e.tarea)}</strong>${e.subtarea?" / "+escapeHtml(e.subtarea):""} · ${escapeHtml(e.persona)}</li>`).join("")}
-document.querySelector("#vista").onchange=async e=>{const historial=e.target.value==="historial";lista.hidden=historial;document.querySelector(".formulario").hidden=historial;panel.hidden=!historial;if(historial)await cargarHistorial()};
+async function cargarHistorial(){const r=await fetch("/api/historial");if(!r.ok)throw Error("No se pudo cargar el historial.");const datos=await r.json();document.querySelector("#calendario").innerHTML=datos.length?`<div class="calendario-grid">${datos.slice(0,30).map(e=>`<div><strong>${new Date(e.fecha).toLocaleDateString("es-ES",{day:"2-digit",month:"short"})}</strong><br>${escapeHtml(e.tarea)}${e.subtarea?" · "+escapeHtml(e.subtarea):""}<small> · ${escapeHtml(e.persona)}</small></div>`).join("")}</div>`:"<p>Aún no hay completados.</p>";document.querySelector("#historial").innerHTML=datos.map(e=>`<li>${new Date(e.fecha).toLocaleString("es-ES")} · <strong>${escapeHtml(e.tarea)}</strong>${e.subtarea?" / "+escapeHtml(e.subtarea):""} · ${escapeHtml(e.persona)}</li>`).join("")}
+document.querySelector("#vista").onchange=async e=>{const historial=e.target.value==="historial";lista.hidden=historial;document.querySelector(".formulario").hidden=historial;panel.hidden=!historial;if(historial)try{await cargarHistorial()}catch(error){mensaje.textContent=error.message}};
 cargarTareas().catch(e=>lista.textContent=e.message);
 </script></body></html>"""
 
