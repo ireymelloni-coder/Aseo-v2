@@ -6,6 +6,7 @@ from pathlib import Path
 import secrets
 import threading
 import time
+import uuid
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote_plus, urlparse
@@ -25,6 +26,7 @@ RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
 EMAIL_REMITENTE = os.environ.get("RESEND_FROM_EMAIL", "onboarding@resend.dev")
 RECORDATORIOS = Path(__file__).with_name("recordatorios_enviados.json")
 ARCHIVO_HISTORIAL = Path(__file__).with_name("historial_datos.json")
+ARCHIVO_AVISOS = Path(__file__).with_name("avisos_datos.json")
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 SUPABASE_ACTIVO = bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
@@ -87,7 +89,7 @@ def cargar_historial():
     try:
         filas = supabase_request("historial_tareas", query="?select=*&order=completada_en.desc")
         historial_remoto = [
-            {"tarea": f["tarea_nombre"], "subtarea": f.get("subtarea_nombre"),
+            {"id": str(f.get("id", "")), "tarea": f["tarea_nombre"], "subtarea": f.get("subtarea_nombre"),
              "persona": f["completada_por"], "fecha": f["completada_en"]}
             for f in filas or []
         ]
@@ -101,13 +103,15 @@ def cargar_historial():
         return historial_local
 
 
-def registrar_historial(nombre, subtarea, persona, fecha):
-    evento = {"tarea": nombre, "subtarea": subtarea, "persona": persona, "fecha": fecha.isoformat()}
+def registrar_historial(nombre, subtarea, persona, fecha, snapshot=None):
+    evento = {"id": uuid.uuid4().hex, "tarea": nombre, "subtarea": subtarea,
+              "persona": persona, "fecha": fecha.isoformat(), "snapshot": snapshot}
     if SUPABASE_ACTIVO:
         try:
             supabase_request("historial_tareas", method="POST", payload={
                 "tarea_nombre": nombre, "subtarea_nombre": subtarea,
                 "completada_por": persona, "completada_en": evento["fecha"],
+                "datos_anteriores": snapshot,
             })
         except (HTTPError, URLError, OSError, ValueError) as error:
             print(f"No se pudo guardar el historial en Supabase: {error}")
@@ -121,6 +125,22 @@ def registrar_historial(nombre, subtarea, persona, fecha):
     historial.insert(0, evento)
     with ARCHIVO_HISTORIAL.open("w", encoding="utf-8") as archivo:
         json.dump(historial, archivo, indent=2, ensure_ascii=False)
+
+
+def cargar_avisos():
+    if not ARCHIVO_AVISOS.exists():
+        return []
+    try:
+        with ARCHIVO_AVISOS.open("r", encoding="utf-8") as archivo:
+            return json.load(archivo)
+    except (OSError, ValueError) as error:
+        print(f"No se pudieron leer los avisos: {error}")
+        return []
+
+
+def guardar_avisos(avisos):
+    with ARCHIVO_AVISOS.open("w", encoding="utf-8") as archivo:
+        json.dump(avisos, archivo, indent=2, ensure_ascii=False)
 
 
 def sincronizar_tarea(nombre):
@@ -307,7 +327,7 @@ body{margin:0;background:#f1f5f9}header{padding:28px 16px;color:#fff;background:
 header h1,header p,main{max-width:760px;margin-left:auto;margin-right:auto}header h1{margin-top:0;margin-bottom:5px}
 main{padding:18px 14px 36px}.mensaje{min-height:24px;color:#166534;font-weight:600}.lista{display:grid;gap:14px}
 .tarjeta,.formulario{padding:18px;border:1px solid #e2e8f0;border-radius:16px;background:#fff;box-shadow:0 5px 16px #0f172a0c}
-.topbar{max-width:760px;margin:auto;display:flex;align-items:center;justify-content:space-between;gap:18px}.topbar select{width:auto;margin:0;background:#ffffff22;color:#fff;border:1px solid #ffffff66}.calendario-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.calendario-grid div{padding:12px;border-radius:12px;background:#f8fafc;border:1px solid #e2e8f0}.calendario-grid small{color:#64748b}
+.topbar{max-width:760px;margin:auto;display:flex;align-items:center;justify-content:space-between;gap:18px}.topbar select{width:auto;margin:0;background:#ffffff22;color:#fff;border:1px solid #ffffff66}.calendario-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.calendario-grid div{padding:12px;border-radius:12px;background:#f8fafc;border:1px solid #e2e8f0}.calendario-grid small{color:#64748b}.calendario-grid button{min-height:36px;margin-top:8px;font-size:.82rem}.aviso{padding:14px;margin-top:10px;border-radius:12px;background:#fff7ed;border:1px solid #fed7aa}.aviso h3{margin:0 0 5px}.aviso p{margin:0;color:#475569}
 .encabezado{display:flex;justify-content:space-between;gap:12px}.encabezado h2{margin:0;text-transform:capitalize}
 .estado{padding:5px 9px;border-radius:999px;background:#dcfce7;color:#166534;font-size:.78rem;font-weight:700;white-space:nowrap}.vencida{background:#fee2e2;color:#991b1b}
 .barra{height:10px;margin:15px 0 10px;overflow:hidden;border-radius:999px;background:#e2e8f0}.relleno{height:100%;background:#22c55e}.relleno.vencida{background:#ef4444}
@@ -318,16 +338,17 @@ button.secundario{border:1px solid #cbd5e1;background:#fff;color:#334155}.confir
 .sublista{margin:14px 0 0;padding:0;list-style:none}.sublista li{padding:8px 0;border-top:1px solid #e2e8f0;font-size:.9rem}
 @media(min-width:650px){.lista{grid-template-columns:repeat(2,1fr)}.tarjeta:last-child{grid-column:span 2}}
 </style></head>
-<body><header><div class="topbar"><div><h1>Control de limpieza</h1><p>Organiza tus tareas del hogar.</p></div><select id="vista" aria-label="Cambiar vista"><option value="tareas">Tareas</option><option value="historial">Calendario e historial</option></select></div></header>
+<body><header><div class="topbar"><div><h1>Control de limpieza</h1><p>Organiza tus tareas del hogar.</p></div><select id="vista" aria-label="Cambiar vista"><option value="tareas">Tareas</option><option value="historial">Calendario e historial</option><option value="avisos">Avisos</option></select></div></header>
 <main><div id="mensaje" class="mensaje" aria-live="polite"></div>
 <section class="formulario"><h2>Añadir tarea</h2><label>Nombre<input id="nuevo-nombre" placeholder="Ej.: Lavar la ropa"></label>
 <label>Cada cuántos días<input id="nuevo-intervalo" type="number" min="1" value="7"></label>
 <label>¿Para quién es?<select id="nuevo-responsable"><option>Montserrat</option><option>Iñaki</option></select></label>
 <div id="subtareas"></div><button type="button" class="secundario" id="agregar-subtarea">+ Añadir subtarea</button>
 <button type="button" id="guardar-tarea">Guardar tarea</button></section>
-<section id="lista" class="lista">Cargando...</section><section id="panel-historial" class="formulario" hidden><h2>Calendario e historial</h2><div id="calendario" class="calendario"></div><ul id="historial" class="sublista"></ul></section></main>
+<section id="lista" class="lista">Cargando...</section><section id="panel-historial" class="formulario" hidden><h2>Calendario e historial</h2><div id="calendario" class="calendario"></div><ul id="historial" class="sublista"></ul></section>
+<section id="panel-avisos" class="formulario" hidden><h2>Avisos</h2><label>Título<input id="aviso-titulo" placeholder="Ej.: Comprar detergente"></label><label>Descripción<textarea id="aviso-descripcion" rows="4" placeholder="Escribe el aviso"></textarea></label><button type="button" id="guardar-aviso">Guardar aviso</button><div id="avisos"></div></section></main>
 <script>
-const lista=document.querySelector("#lista"),mensaje=document.querySelector("#mensaje"),subtareas=document.querySelector("#subtareas"),panel=document.querySelector("#panel-historial");
+const lista=document.querySelector("#lista"),mensaje=document.querySelector("#mensaje"),subtareas=document.querySelector("#subtareas"),panel=document.querySelector("#panel-historial"),panelAvisos=document.querySelector("#panel-avisos");
 const escapeHtml=v=>String(v).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
 function agregarCampoSubtarea(){const fila=document.createElement("div");fila.className="subtarea";fila.innerHTML='<input placeholder="Ej.: Colgar la ropa" class="sub-nombre"><input type="number" min="1" value="3" class="sub-dias">';subtareas.append(fila)}
 document.querySelector("#agregar-subtarea").onclick=agregarCampoSubtarea;
@@ -348,8 +369,11 @@ const responsable=document.querySelector("#nuevo-responsable").value;
 const subs=[...document.querySelectorAll(".subtarea")].map(f=>({nombre:f.querySelector(".sub-nombre").value.trim(),dias:Number(f.querySelector(".sub-dias").value)})).filter(s=>s.nombre);
 if(!nombre||!intervalo){mensaje.textContent="Indica un nombre y un plazo válido.";return}const r=await fetch("/api/tareas",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({nombre,intervalo,responsable,subtareas:subs})});
 if(!r.ok){mensaje.textContent=(await r.text())||"No se pudo crear la tarea.";return}document.querySelector("#nuevo-nombre").value="";subtareas.innerHTML="";mensaje.textContent="Tarea añadida.";await cargarTareas()};
-async function cargarHistorial(){const r=await fetch("/api/historial");if(!r.ok)throw Error("No se pudo cargar el historial.");const datos=await r.json();document.querySelector("#calendario").innerHTML=datos.length?`<div class="calendario-grid">${datos.slice(0,30).map(e=>`<div><strong>${new Date(e.fecha).toLocaleDateString("es-ES",{day:"2-digit",month:"short"})}</strong><br>${escapeHtml(e.tarea)}${e.subtarea?" · "+escapeHtml(e.subtarea):""}<small> · ${escapeHtml(e.persona)}</small></div>`).join("")}</div>`:"<p>Aún no hay completados.</p>";document.querySelector("#historial").innerHTML=datos.map(e=>`<li>${new Date(e.fecha).toLocaleString("es-ES")} · <strong>${escapeHtml(e.tarea)}</strong>${e.subtarea?" / "+escapeHtml(e.subtarea):""} · ${escapeHtml(e.persona)}</li>`).join("")}
-document.querySelector("#vista").onchange=async e=>{const historial=e.target.value==="historial";lista.hidden=historial;document.querySelector(".formulario").hidden=historial;panel.hidden=!historial;if(historial)try{await cargarHistorial()}catch(error){mensaje.textContent=error.message}};
+async function cargarHistorial(){const r=await fetch("/api/historial");if(!r.ok)throw Error("No se pudo cargar el historial.");const datos=await r.json();document.querySelector("#calendario").innerHTML=datos.length?`<div class="calendario-grid">${datos.slice(0,30).map(e=>`<div><strong>${new Date(e.fecha).toLocaleDateString("es-ES",{day:"2-digit",month:"short"})}</strong><br>${escapeHtml(e.tarea)}${e.subtarea?" · "+escapeHtml(e.subtarea):""}<small> · ${escapeHtml(e.persona)}</small><button type="button" data-deshacer="${escapeHtml(e.id||"")}">Deshacer</button></div>`).join("")}</div>`:"<p>Aún no hay completados.</p>";document.querySelectorAll("[data-deshacer]").forEach(b=>b.onclick=()=>deshacer(b.dataset.deshacer));document.querySelector("#historial").innerHTML=datos.map(e=>`<li>${new Date(e.fecha).toLocaleString("es-ES")} · <strong>${escapeHtml(e.tarea)}</strong>${e.subtarea?" / "+escapeHtml(e.subtarea):""} · ${escapeHtml(e.persona)}</li>`).join("")}
+async function deshacer(id){if(!id){mensaje.textContent="Este registro antiguo no se puede deshacer.";return}if(!confirm("¿Seguro que quieres deshacer esta actividad?"))return;const r=await fetch("/api/historial/deshacer",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})});if(!r.ok){mensaje.textContent="No se pudo deshacer.";return}mensaje.textContent="Actividad deshecha.";await cargarHistorial();await cargarTareas()}
+async function cargarAvisos(){const r=await fetch("/api/avisos");const datos=await r.json();document.querySelector("#avisos").innerHTML=datos.length?datos.map(a=>`<article class="aviso"><h3>${escapeHtml(a.titulo)}</h3><p>${escapeHtml(a.descripcion)}</p></article>`).join(""):"<p>No hay avisos.</p>"}
+document.querySelector("#guardar-aviso").onclick=async()=>{const titulo=document.querySelector("#aviso-titulo").value.trim(),descripcion=document.querySelector("#aviso-descripcion").value.trim();if(!titulo||!descripcion){mensaje.textContent="Escribe un título y una descripción.";return}const r=await fetch("/api/avisos",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({titulo,descripcion})});if(!r.ok){mensaje.textContent="No se pudo guardar el aviso.";return}document.querySelector("#aviso-titulo").value="";document.querySelector("#aviso-descripcion").value="";mensaje.textContent="Aviso guardado.";await cargarAvisos()}
+document.querySelector("#vista").onchange=async e=>{const vista=e.target.value, historial=vista==="historial",avisos=vista==="avisos";lista.hidden=historial||avisos;document.querySelector(".formulario").hidden=historial||avisos;panel.hidden=!historial;panelAvisos.hidden=!avisos;if(historial)try{await cargarHistorial()}catch(error){mensaje.textContent=error.message}if(avisos)await cargarAvisos()};
 cargarTareas().catch(e=>lista.textContent=e.message);
 </script></body></html>"""
 
@@ -377,6 +401,7 @@ class Solicitudes(BaseHTTPRequestHandler):
         if ruta=="/": self.enviar(HTML)
         elif ruta=="/api/tareas": self.enviar(json.dumps(obtener_tareas(),ensure_ascii=False),"application/json; charset=utf-8")
         elif ruta=="/api/historial": self.enviar(json.dumps(cargar_historial(),ensure_ascii=False),"application/json; charset=utf-8")
+        elif ruta=="/api/avisos": self.enviar(json.dumps(cargar_avisos(),ensure_ascii=False),"application/json; charset=utf-8")
         else: self.enviar("No encontrado",estado=404)
 
     def leer_json(self):
@@ -408,6 +433,15 @@ class Solicitudes(BaseHTTPRequestHandler):
         if ruta=="/api/completar":
             nombre=dato.get("nombre"); persona=dato.get("persona")
             if nombre not in tareas or persona not in PERSONAS: self.enviar("Datos inválidos",estado=400); return
+            snapshot = None
+            if tareas[nombre].get("temporal"):
+                snapshot = dict(tareas[nombre])
+                snapshot["ultima"] = snapshot["ultima"].isoformat()
+                snapshot["subtareas"] = []
+                for sub in tareas[nombre].get("subtareas", []):
+                    copia = dict(sub)
+                    copia["ultima"] = copia["ultima"].isoformat() if copia.get("ultima") else None
+                    snapshot["subtareas"].append(copia)
             if dato.get("subnombre"):
                 subtarea=next((s for s in tareas[nombre]["subtareas"] if s["nombre"]==dato["subnombre"]),None)
                 if not subtarea: self.enviar("Subtarea no encontrada",estado=404); return
@@ -419,7 +453,7 @@ class Solicitudes(BaseHTTPRequestHandler):
                     del tareas[nombre]
                 else:
                     tareas[nombre]["ultima"]=ahora; tareas[nombre]["realizada_por"]=persona
-            registrar_historial(nombre, dato.get("subnombre"), persona, ahora)
+            registrar_historial(nombre, dato.get("subnombre"), persona, ahora, snapshot)
             if SUPABASE_ACTIVO and nombre in tareas:
                 try:
                     if dato.get("subnombre"):
@@ -431,6 +465,43 @@ class Solicitudes(BaseHTTPRequestHandler):
                 except (HTTPError, URLError, OSError, ValueError):
                     pass
             guardar_datos(tareas); self.enviar(json.dumps({"ok":True}),"application/json"); return
+        if ruta=="/api/avisos":
+            titulo=str(dato.get("titulo","")).strip()
+            descripcion=str(dato.get("descripcion","")).strip()
+            if not titulo or not descripcion:
+                self.enviar("Título y descripción son obligatorios", estado=400); return
+            avisos=cargar_avisos()
+            avisos.insert(0, {"id": uuid.uuid4().hex, "titulo": titulo, "descripcion": descripcion,
+                              "creado_en": datetime.now().isoformat()})
+            guardar_avisos(avisos)
+            self.enviar(json.dumps({"ok":True}), "application/json"); return
+        if ruta=="/api/historial/deshacer":
+            evento_id=dato.get("id")
+            historial=cargar_historial()
+            evento=next((e for e in historial if e.get("id")==evento_id), None)
+            if not evento:
+                self.enviar("Registro no encontrado", estado=404); return
+            historial.remove(evento)
+            if evento.get("snapshot"):
+                restaurada = dict(evento["snapshot"])
+                restaurada["ultima"] = datetime.fromisoformat(restaurada["ultima"])
+                restaurada["subtareas"] = [
+                    dict(sub, ultima=datetime.fromisoformat(sub["ultima"]) if sub.get("ultima") else None)
+                    for sub in restaurada.get("subtareas", [])
+                ]
+                tareas[evento["tarea"]]=restaurada
+            elif evento["tarea"] in tareas:
+                tareas[evento["tarea"]]["ultima"]=datetime.now()-timedelta(days=tareas[evento["tarea"]]["intervalo"])
+                tareas[evento["tarea"]]["realizada_por"]=None
+            with ARCHIVO_HISTORIAL.open("w", encoding="utf-8") as archivo:
+                json.dump(historial, archivo, indent=2, ensure_ascii=False)
+            guardar_datos(tareas)
+            if SUPABASE_ACTIVO and evento_id.isdigit():
+                try:
+                    supabase_request("historial_tareas", method="DELETE", query=f"?id=eq.{evento_id}")
+                except (HTTPError, URLError, OSError, ValueError) as error:
+                    print(f"No se pudo borrar el historial remoto: {error}")
+            self.enviar(json.dumps({"ok":True}), "application/json"); return
         self.enviar("No encontrado",estado=404)
 
     def log_message(self, formato, *argumentos): print(f"{self.address_string()} - {formato % argumentos}")
