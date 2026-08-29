@@ -32,8 +32,12 @@ create table if not exists public.historial_tareas (
   tarea_nombre text not null,
   subtarea_nombre text,
   completada_por text not null check (completada_por in ('Montserrat', 'Iñaki')),
-  completada_en timestamptz not null default now()
+  completada_en timestamptz not null default now(),
+  datos_anteriores jsonb
 );
+
+alter table public.historial_tareas
+  add column if not exists datos_anteriores jsonb;
 
 create index if not exists historial_tareas_fecha_idx
   on public.historial_tareas(completada_en desc);
