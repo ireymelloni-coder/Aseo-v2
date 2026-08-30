@@ -42,12 +42,14 @@ def supabase_request(endpoint, method="GET", payload=None, query=""):
         return None
     url = f"{SUPABASE_URL}/rest/v1/{endpoint}{query}"
     datos = json.dumps(payload).encode("utf-8") if payload is not None else None
-    solicitud = Request(url, data=datos, method=method, headers={
+    encabezados = {
         "apikey": SUPABASE_SERVICE_ROLE_KEY,
-        "Authorization": "B" + "earer " + SUPABASE_SERVICE_ROLE_KEY,
         "Content-Type": "application/json",
         "Prefer": "return=representation",
-    })
+    }
+    if not SUPABASE_SERVICE_ROLE_KEY.startswith("sb_secret_"):
+        encabezados["Authorization"] = f"Bearer {SUPABASE_SERVICE_ROLE_KEY}"
+    solicitud = Request(url, data=datos, method=method, headers=encabezados)
     with urlopen(solicitud, timeout=10) as respuesta:
         contenido = respuesta.read()
         return json.loads(contenido.decode("utf-8")) if contenido else []
