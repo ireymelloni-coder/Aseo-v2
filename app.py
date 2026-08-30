@@ -128,19 +128,35 @@ def registrar_historial(nombre, subtarea, persona, fecha, snapshot=None):
 
 
 def cargar_avisos():
-    if not ARCHIVO_AVISOS.exists():
-        return []
+    avisos_locales = []
+    if ARCHIVO_AVISOS.exists():
+        try:
+            with ARCHIVO_AVISOS.open("r", encoding="utf-8") as archivo:
+                avisos_locales = json.load(archivo)
+        except (OSError, ValueError) as error:
+            print(f"No se pudieron leer los avisos locales: {error}")
+    if not SUPABASE_ACTIVO:
+        return avisos_locales
     try:
-        with ARCHIVO_AVISOS.open("r", encoding="utf-8") as archivo:
-            return json.load(archivo)
-    except (OSError, ValueError) as error:
-        print(f"No se pudieron leer los avisos: {error}")
-        return []
+        filas = supabase_request("avisos", query="?select=*&order=creado_en.desc")
+        return [{"id": str(f["id"]), "titulo": f["titulo"], "descripcion": f["descripcion"],
+                 "creado_en": f["creado_en"]} for f in filas or []]
+    except (OSError, ValueError, HTTPError, URLError) as error:
+        print(f"No se pudieron leer los avisos de Supabase: {error}")
+        return avisos_locales
 
 
 def guardar_avisos(avisos):
     with ARCHIVO_AVISOS.open("w", encoding="utf-8") as archivo:
         json.dump(avisos, archivo, indent=2, ensure_ascii=False)
+
+
+def sincronizar_aviso(aviso):
+    if SUPABASE_ACTIVO:
+        supabase_request("avisos", method="POST", payload={
+            "titulo": aviso["titulo"], "descripcion": aviso["descripcion"],
+            "creado_en": aviso["creado_en"],
+        })
 
 
 def sincronizar_tarea(nombre):
@@ -417,7 +433,11 @@ class Solicitudes(BaseHTTPRequestHandler):
         try: dato=self.leer_json()
         except (json.JSONDecodeError, ValueError): self.enviar("Datos inválidos",estado=400); return
         if ruta=="/api/tareas":
-            nombre=str(dato.get("nombre","")).strip(); intervalo=int(dato.get("intervalo",0))
+            nombre=str(dato.get("nombre","")).strip()
+            try:
+                intervalo=int(dato.get("intervalo",0))
+            except (TypeError, ValueError):
+                self.enviar("El intervalo debe ser un número",estado=400); return
             if not nombre or intervalo<1 or nombre in tareas: self.enviar("Nombre inválido o ya existente",estado=400); return
             responsable=dato.get("responsable")
             if responsable not in PERSONAS: self.enviar("Responsable inválido",estado=400); return
@@ -474,6 +494,10 @@ class Solicitudes(BaseHTTPRequestHandler):
             avisos.insert(0, {"id": uuid.uuid4().hex, "titulo": titulo, "descripcion": descripcion,
                               "creado_en": datetime.now().isoformat()})
             guardar_avisos(avisos)
+            try:
+                sincronizar_aviso(avisos[0])
+            except (HTTPError, URLError, OSError, ValueError) as error:
+                print(f"No se pudo guardar el aviso en Supabase: {error}")
             self.enviar(json.dumps({"ok":True}), "application/json"); return
         if ruta=="/api/historial/deshacer":
             evento_id=dato.get("id")
