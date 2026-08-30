@@ -28,7 +28,10 @@ RECORDATORIOS = Path(__file__).with_name("recordatorios_enviados.json")
 ARCHIVO_HISTORIAL = Path(__file__).with_name("historial_datos.json")
 ARCHIVO_AVISOS = Path(__file__).with_name("avisos_datos.json")
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
-SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get(
+    "SUPABASE_SERVICE_ROLE_KEY",
+    os.environ.get("SUPABASE_SECRET_KEY", ""),
+)
 SUPABASE_ACTIVO = bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
 TAREAS_PREDEFINIDAS = {"baño": 7, "cocina": 3, "encerar piso": 14}
 
@@ -429,6 +432,12 @@ class Solicitudes(BaseHTTPRequestHandler):
                 except (HTTPError, URLError, OSError, ValueError) as error:
                     print(f"Health check de Supabase falló: {error}")
                     estado["supabase_conectado"] = False
+                    if isinstance(error, HTTPError):
+                        estado["supabase_error"] = f"HTTP {error.code}"
+                    elif isinstance(error, URLError):
+                        estado["supabase_error"] = "URL o red inaccesible"
+                    else:
+                        estado["supabase_error"] = "Respuesta inválida"
             self.enviar(json.dumps(estado), "application/json; charset=utf-8")
             return
         if not self.autenticado(): self.enviar(LOGIN_HTML); return
