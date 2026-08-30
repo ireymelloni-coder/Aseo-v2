@@ -76,6 +76,22 @@ def cargar_datos_supabase():
     return tareas
 
 
+def datos_predeterminados():
+    ahora = datetime.now()
+    return {
+        nombre: {
+            "nombre": nombre,
+            "intervalo": intervalo,
+            "ultima": ahora - timedelta(days=5 if nombre == "baño" else 2 if nombre == "cocina" else 10),
+            "realizada_por": None,
+            "asignada_a": None,
+            "temporal": False,
+            "subtareas": [],
+        }
+        for nombre, intervalo in TAREAS_PREDEFINIDAS.items()
+    }
+
+
 def cargar_historial():
     historial_local = []
     if ARCHIVO_HISTORIAL.exists():
@@ -90,7 +106,8 @@ def cargar_historial():
         filas = supabase_request("historial_tareas", query="?select=*&order=completada_en.desc")
         historial_remoto = [
             {"id": str(f.get("id", "")), "tarea": f["tarea_nombre"], "subtarea": f.get("subtarea_nombre"),
-             "persona": f["completada_por"], "fecha": f["completada_en"]}
+             "persona": f["completada_por"], "fecha": f["completada_en"],
+             "snapshot": f.get("datos_anteriores")}
             for f in filas or []
         ]
         claves = {(e["tarea"], e.get("subtarea"), e["persona"], e["fecha"]) for e in historial_remoto}
@@ -107,14 +124,11 @@ def registrar_historial(nombre, subtarea, persona, fecha, snapshot=None):
     evento = {"id": uuid.uuid4().hex, "tarea": nombre, "subtarea": subtarea,
               "persona": persona, "fecha": fecha.isoformat(), "snapshot": snapshot}
     if SUPABASE_ACTIVO:
-        try:
-            supabase_request("historial_tareas", method="POST", payload={
-                "tarea_nombre": nombre, "subtarea_nombre": subtarea,
-                "completada_por": persona, "completada_en": evento["fecha"],
-                "datos_anteriores": snapshot,
-            })
-        except (HTTPError, URLError, OSError, ValueError) as error:
-            print(f"No se pudo guardar el historial en Supabase: {error}")
+        supabase_request("historial_tareas", method="POST", payload={
+            "tarea_nombre": nombre, "subtarea_nombre": subtarea,
+            "completada_por": persona, "completada_en": evento["fecha"],
+            "datos_anteriores": snapshot,
+        })
     historial = []
     if ARCHIVO_HISTORIAL.exists():
         try:
@@ -139,8 +153,10 @@ def cargar_avisos():
         return avisos_locales
     try:
         filas = supabase_request("avisos", query="?select=*&order=creado_en.desc")
-        return [{"id": str(f["id"]), "titulo": f["titulo"], "descripcion": f["descripcion"],
-                 "creado_en": f["creado_en"]} for f in filas or []]
+        remotos = [{"id": str(f["id"]), "titulo": f["titulo"], "descripcion": f["descripcion"],
+                    "creado_en": f["creado_en"]} for f in filas or []]
+        claves = {(a["titulo"], a["descripcion"]) for a in remotos}
+        return remotos + [a for a in avisos_locales if (a["titulo"], a["descripcion"]) not in claves]
     except (OSError, ValueError, HTTPError, URLError) as error:
         print(f"No se pudieron leer los avisos de Supabase: {error}")
         return avisos_locales
@@ -179,17 +195,7 @@ def sincronizar_tarea(nombre):
 
 
 def cargar_datos():
-    ahora = datetime.now()
-    predeterminadas = {
-        nombre: {
-            "nombre": nombre,
-            "intervalo": intervalo,
-            "ultima": ahora - timedelta(days=5 if nombre == "baño" else 2 if nombre == "cocina" else 10),
-            "realizada_por": None,
-            "subtareas": [],
-        }
-        for nombre, intervalo in TAREAS_PREDEFINIDAS.items()
-    }
+    predeterminadas = datos_predeterminados()
     if not ARCHIVO_DATOS.exists():
         return predeterminadas
     with ARCHIVO_DATOS.open("r", encoding="utf-8") as archivo:
@@ -231,8 +237,11 @@ def guardar_datos(tareas):
 if SUPABASE_ACTIVO:
     try:
         tareas = cargar_datos_supabase()
-        if not tareas:
-            raise ValueError("Supabase vacío")
+        locales = cargar_datos()
+        for nombre, tarea in locales.items():
+            if nombre not in tareas:
+                tareas[nombre] = tarea
+                sincronizar_tarea(nombre)
     except (HTTPError, URLError, OSError, ValueError, KeyError):
         print("Supabase no disponible; usando almacenamiento JSON local.")
         tareas = cargar_datos()
@@ -411,7 +420,16 @@ class Solicitudes(BaseHTTPRequestHandler):
         ruta=urlparse(self.path).path
         if ruta=="/manifest.json": self.enviar(MANIFEST,"application/manifest+json; charset=utf-8"); return
         if ruta=="/health":
-            self.enviar(json.dumps({"ok": True}), "application/json; charset=utf-8")
+            estado = {"ok": True, "supabase_configurado": SUPABASE_ACTIVO}
+            if SUPABASE_ACTIVO:
+                try:
+                    supabase_request("tareas", query="?select=id&limit=1")
+                    supabase_request("avisos", query="?select=id&limit=1")
+                    estado["supabase_conectado"] = True
+                except (HTTPError, URLError, OSError, ValueError) as error:
+                    print(f"Health check de Supabase falló: {error}")
+                    estado["supabase_conectado"] = False
+            self.enviar(json.dumps(estado), "application/json; charset=utf-8")
             return
         if not self.autenticado(): self.enviar(LOGIN_HTML); return
         if ruta=="/": self.enviar(HTML)
@@ -447,8 +465,12 @@ class Solicitudes(BaseHTTPRequestHandler):
             guardar_datos(tareas)
             try:
                 sincronizar_tarea(nombre)
-            except (HTTPError, URLError, OSError, ValueError):
-                pass
+            except (HTTPError, URLError, OSError, ValueError) as error:
+                del tareas[nombre]
+                guardar_datos(tareas)
+                print(f"No se pudo guardar la tarea en Supabase: {error}")
+                self.enviar("No se pudo guardar la tarea en Supabase. Revisa las variables y tablas.", estado=502)
+                return
             self.enviar(json.dumps({"ok":True}),"application/json"); return
         if ruta=="/api/completar":
             nombre=dato.get("nombre"); persona=dato.get("persona")
@@ -473,7 +495,12 @@ class Solicitudes(BaseHTTPRequestHandler):
                     del tareas[nombre]
                 else:
                     tareas[nombre]["ultima"]=ahora; tareas[nombre]["realizada_por"]=persona
-            registrar_historial(nombre, dato.get("subnombre"), persona, ahora, snapshot)
+            try:
+                registrar_historial(nombre, dato.get("subnombre"), persona, ahora, snapshot)
+            except (HTTPError, URLError, OSError, ValueError) as error:
+                print(f"No se pudo guardar el historial: {error}")
+                self.enviar("No se pudo guardar el historial en Supabase.", estado=502)
+                return
             if SUPABASE_ACTIVO and nombre in tareas:
                 try:
                     if dato.get("subnombre"):
@@ -497,7 +524,11 @@ class Solicitudes(BaseHTTPRequestHandler):
             try:
                 sincronizar_aviso(avisos[0])
             except (HTTPError, URLError, OSError, ValueError) as error:
+                avisos.pop(0)
+                guardar_avisos(avisos)
                 print(f"No se pudo guardar el aviso en Supabase: {error}")
+                self.enviar("No se pudo guardar el aviso en Supabase. Revisa las variables y tablas.", estado=502)
+                return
             self.enviar(json.dumps({"ok":True}), "application/json"); return
         if ruta=="/api/historial/deshacer":
             evento_id=dato.get("id")
